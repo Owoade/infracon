@@ -1,4 +1,5 @@
 module github.com/Owoade/infracon/cli
+replace github.com/Owoade/infracon/cli => ./
 
 go 1.24.1
 

@@ -1,7 +1,8 @@
-package cli
+package main
 
 import (
-	command "github.com/Owoade/infracon/cli/command"
+	"fmt"
+	"\"
 	"github.com/spf13/cobra"
 )
 
@@ -13,8 +14,10 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			action := args[0]
 			if action == "init" {
-				command.
+				fmt.Println("Hello there")
 			}
 		},
 	}
+
+	rootCommand.Execute()
 }
