@@ -56,19 +56,18 @@ func Authenticate(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func VerifyToken(w http.ResponseWriter, r *http.Request) {
+func VerifyToken(r *http.Request) (bool, string) {
 	authHeader := r.Header.Get("Authorization")
 	accessKey, err := config.GetCredentials("access_key")
 	if err != nil {
-		http.Error(w, "Acces key is not set", 400)
-		return
+		return false, "Acces key is not set"
 	}
 
 	if !verifyToken(accessKey, message, authHeader) {
-		http.Error(w, "Invalid token", 400)
-		return
+		return false, "Invalid token"
 	}
 
+	return true, ""
 }
 
 func signToken(accessKey string, message string) string {

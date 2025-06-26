@@ -11,6 +11,10 @@ import (
 
 func UploadFile(w http.ResponseWriter, r *http.Request) {
 
+	if validAuth, err := VerifyToken(r); validAuth {
+		http.Error(w, err, 400)
+	}
+
 	err := r.ParseMultipartForm(10 << 20)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
