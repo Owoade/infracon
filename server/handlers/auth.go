@@ -46,8 +46,6 @@ func Authenticate(w http.ResponseWriter, r *http.Request) {
 
 	token := signToken(accessKey, message)
 
-	fmt.Println(token)
-
 	w.Header().Set("Content-Type", "application/json")
 
 	response := map[string]string{
