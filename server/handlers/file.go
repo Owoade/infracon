@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 )
 
 func UploadFile(w http.ResponseWriter, r *http.Request) {
@@ -29,17 +28,13 @@ func UploadFile(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Metadata", metadata)
 	defer file.Close()
 
+	home, _ := os.UserHomeDir();
 	path := r.FormValue("path")
+	projectPath := home + "/" + "infracon-apps" + "/" + path
 
-	pathElements := strings.Split(path, "/")
+	os.MkdirAll(projectPath, 0755);
 
-	if len(pathElements) > 1 {
-		folders := pathElements[:len(pathElements)-1]
-		folderPath := strings.Join(folders, "/")
-		os.MkdirAll(folderPath, 0755)
-	}
-
-	destinationFile, err := os.Create(path)
+	destinationFile, err := os.Create(projectPath)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
