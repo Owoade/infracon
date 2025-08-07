@@ -22,6 +22,13 @@ func (handler *ServerHandler) UploadFile(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	applicationId := r.FormValue("application_id")
+
+	if applicationId == "" {
+		http.Error(w, "`application_id` is required", 400)
+		return
+	}
+
 	file, metadata, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, err.Error(), 400)
@@ -32,7 +39,18 @@ func (handler *ServerHandler) UploadFile(w http.ResponseWriter, r *http.Request)
 
 	home, _ := os.UserHomeDir()
 	path := r.FormValue("path")
-	// applicationId := r.FormValue("application_id")
+
+	existingApplication, err := handler.Repo.GetApplicationFromDB(applicationId)
+	if err != nil {
+		http.Error(w, "Error fetching existing application", 400)
+		return
+	}
+
+	if existingApplication == nil {
+		http.Error(w, "Application not found", 400)
+		return
+	}
+
 	projectPath := home + "/" + "infracon-apps" + "/" + path
 
 	projectPathArr := strings.Split(projectPath, "/")

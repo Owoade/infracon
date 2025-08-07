@@ -7,19 +7,19 @@ import (
 )
 
 type ApplicationModel struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Path               string `json:"path"`
-	ClientPath         string `json:"client_path"`
-	DeploymentStrategy string `json:"deployment_strategy,omitempty"`
-	Type               string `json:"type,omitempty"`
-	DockerfilePath     string `json:"dockerfile_path,omitempty"`
-	BuildCommand       string `json:"build_command,omitempty"`
-	RunCommand         string `json:"run_command,omitempty"`
-	ApplicationPort    int    `json:"application_port,omitempty"`
-	InternalPort       int    `json:"internal_port,omitempty"`
-	CreatedAt          string `json:"created_at"`
-	UpdatedAt          string `json:"updated_at"`
+	ID                 string  `json:"id"`
+	Name               string  `json:"name"`
+	Path               string  `json:"path"`
+	ClientPath         string  `json:"client_path"`
+	DeploymentStrategy *string `json:"deployment_strategy,omitempty"`
+	Type               *string `json:"type,omitempty"`
+	DockerfilePath     *string `json:"dockerfile_path,omitempty"`
+	BuildCommand       *string `json:"build_command,omitempty"`
+	RunCommand         *string `json:"run_command,omitempty"`
+	ApplicationPort    *int    `json:"application_port,omitempty"`
+	InternalPort       *int    `json:"internal_port,omitempty"`
+	CreatedAt          string  `json:"created_at"`
+	UpdatedAt          string  `json:"updated_at"`
 }
 
 type Repo struct {
@@ -68,6 +68,44 @@ func NewRepo(db *sql.DB) *Repo {
 func (repo *Repo) GetApplicationFromDB(applicationId string) (*ApplicationModel, error) {
 
 	rows, err := repo.DB.Query(`SELECT * FROM apps WHERE id = ?`, applicationId)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var application ApplicationModel
+
+	defer rows.Close()
+
+	for rows.Next() {
+
+		if err = rows.Scan(
+			&application.ID,
+			&application.Name,
+			&application.Path,
+			&application.ClientPath,
+			&application.DeploymentStrategy,
+			&application.Type,
+			&application.DockerfilePath,
+			&application.BuildCommand,
+			&application.RunCommand,
+			&application.ApplicationPort,
+			&application.InternalPort,
+			&application.CreatedAt,
+			&application.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+	}
+
+	return &application, nil
+
+}
+
+func (repo *Repo) GetApplicationFromDBByClientPath(clientPath string) (*ApplicationModel, error) {
+
+	rows, err := repo.DB.Query(`SELECT * FROM apps WHERE client_path = ?`, clientPath)
 
 	if err != nil {
 		return nil, err

@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -32,6 +32,16 @@ func (handler *ServerHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if body.Type == "" {
+		http.Error(w, "`type` is required", 400)
+		return
+	}
+
+	if body.Type != "new" || body.Type == "existing" {
+		http.Error(w, "`type` must be either of value 'new' or 'existing'", 400)
+		return
+	}
+
 	if body.Type == "existing" && body.ApplicationID == "" {
 		http.Error(w, "`application_id` is required", 400)
 		return
@@ -48,7 +58,7 @@ func (handler *ServerHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Type == "new" {
-		applicationID, err := connectNewProject(handler.DB, body)
+		applicationID, err := connectNewProject(handler, body)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
@@ -59,6 +69,9 @@ func (handler *ServerHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 
 		json.NewEncoder(w).Encode(response)
+
+		return
+
 	}
 
 	if err := connectExistingProject(handler, body.ApplicationID, body.Path); err != nil {
@@ -74,7 +87,7 @@ func (handler *ServerHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func connectNewProject(db *sql.DB, payload ConnectApplicationPayload) (applicationId string, err error) {
+func connectNewProject(handler *ServerHandler, payload ConnectApplicationPayload) (applicationId string, err error) {
 
 	applicationID := uuid.New().String()
 	clientPath := payload.Path
@@ -91,30 +104,42 @@ func connectNewProject(db *sql.DB, payload ConnectApplicationPayload) (applicati
 		return "", errors.New("unable to create project folder")
 	}
 
-	sqlStatement := `
-		INSERT INTO apps (
-			id,
-			name,
-			path,
-			client_path,
-			created_at,
-			updated_at
-		) 
-		VALUES (?,?,?,?,?,?)
-	`
-	if _, err := db.Exec(
-		sqlStatement,
-		applicationID,
-		payload.Name,
-		projectPath,
-		clientPath,
-		timestamp,
-		timestamp,
-	); err != nil {
-		return "", errors.New("unable to create folder entry in db")
+	existingProjectByClientPath, err := handler.Repo.GetApplicationFromDBByClientPath(clientPath)
+	if err != nil {
+		log.Fatal(err.Error())
+		return "", errors.New("unable to fetch project by client path")
 	}
 
-	return applicationID, nil
+	if existingProjectByClientPath == nil {
+
+		sqlStatement := `
+			INSERT INTO apps (
+				id,
+				name,
+				path,
+				client_path,
+				created_at,
+				updated_at
+			) 
+			VALUES (?,?,?,?,?,?)
+		`
+		if _, err := handler.DB.Exec(
+			sqlStatement,
+			applicationID,
+			payload.Name,
+			projectPath,
+			clientPath,
+			timestamp,
+			timestamp,
+		); err != nil {
+			return "", errors.New("unable to create folder entry in db")
+		}
+
+		return applicationID, nil
+
+	}
+
+	return existingProjectByClientPath.ID, nil
 
 }
 

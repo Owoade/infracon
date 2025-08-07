@@ -59,7 +59,7 @@ func (handler *ServerHandler) Authenticate(w http.ResponseWriter, r *http.Reques
 func VerifyToken(r *http.Request) (bool, string) {
 	authHeader := r.Header.Get("Authorization")
 	accessKey, err := config.GetCredentials("access_key")
-	fmt.Println(accessKey)
+
 	if err != nil {
 		return false, "Acces key is not set"
 	}
