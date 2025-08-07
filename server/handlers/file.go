@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
-func UploadFile(w http.ResponseWriter, r *http.Request) {
+func (handler *ServerHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 
-	if validAuth, err := VerifyToken(r); validAuth {
+	if validAuth, err := VerifyToken(r); !validAuth {
 		http.Error(w, err, 400)
+		return
 	}
 
 	err := r.ParseMultipartForm(10 << 20)
@@ -26,11 +29,12 @@ func UploadFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	fmt.Println("Metadata", metadata)
+
 	defer file.Close()
 
 	home, _ := os.UserHomeDir()
 	path := r.FormValue("path")
+	applicationId := r.FormValue("application_id")
 	projectPath := home + "/" + "infracon-apps" + "/" + path
 
 	projectPathArr := strings.Split(projectPath, "/")
@@ -56,6 +60,18 @@ func UploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 
 		json.NewEncoder(w).Encode(response)
+	}
+
+	if applicationId == "" {
+
+		applicationId = uuid.New().String()
+		_, err = handler.db.Exec(`INSERT INTO apps (id,path) VALUES(?,?)`, applicationId, projectPath)
+
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
 	}
 
 	response := map[string]any{

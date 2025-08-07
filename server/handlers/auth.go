@@ -17,7 +17,7 @@ type AuthPayload struct {
 
 const message = "AUTH"
 
-func Authenticate(w http.ResponseWriter, r *http.Request) {
+func (handler *ServerHandler) Authenticate(w http.ResponseWriter, r *http.Request) {
 	var body AuthPayload
 	err := json.NewDecoder(r.Body).Decode(&body)
 
@@ -59,6 +59,7 @@ func Authenticate(w http.ResponseWriter, r *http.Request) {
 func VerifyToken(r *http.Request) (bool, string) {
 	authHeader := r.Header.Get("Authorization")
 	accessKey, err := config.GetCredentials("access_key")
+	fmt.Println(accessKey)
 	if err != nil {
 		return false, "Acces key is not set"
 	}
