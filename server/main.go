@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/Owoade/infracon/db"
 	"github.com/Owoade/infracon/server/handlers"
 )
 
@@ -12,20 +11,14 @@ func Start() {
 
 	fmt.Println("Running server on port 2000")
 
-	db, err := db.InitializeDB()
-
-	if err != nil {
-		panic(err)
-	}
-
-	handler := handlers.NewServerHandler(db)
+	handler := handlers.NewServerHandler()
 
 	http.HandleFunc("/upload", handler.UploadFile)
 	http.HandleFunc("/auth", handler.Authenticate)
+	http.HandleFunc("/connect", handler.Connect)
+	http.HandleFunc("/apps", handler.ListProject)
 
-	err = http.ListenAndServe(":2000", nil)
-
-	if err != nil {
+	if err := http.ListenAndServe(":2000", nil); err != nil {
 		panic(err)
 	}
 }

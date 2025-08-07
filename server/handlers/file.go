@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
 func (handler *ServerHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +32,7 @@ func (handler *ServerHandler) UploadFile(w http.ResponseWriter, r *http.Request)
 
 	home, _ := os.UserHomeDir()
 	path := r.FormValue("path")
-	applicationId := r.FormValue("application_id")
+	// applicationId := r.FormValue("application_id")
 	projectPath := home + "/" + "infracon-apps" + "/" + path
 
 	projectPathArr := strings.Split(projectPath, "/")
@@ -60,18 +58,6 @@ func (handler *ServerHandler) UploadFile(w http.ResponseWriter, r *http.Request)
 		}
 
 		json.NewEncoder(w).Encode(response)
-	}
-
-	if applicationId == "" {
-
-		applicationId = uuid.New().String()
-		_, err = handler.db.Exec(`INSERT INTO apps (id,path) VALUES(?,?)`, applicationId, projectPath)
-
-		if err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-
 	}
 
 	response := map[string]any{

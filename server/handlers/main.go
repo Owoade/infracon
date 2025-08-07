@@ -1,13 +1,29 @@
 package handlers
 
-import "database/sql"
+import (
+	"database/sql"
+
+	infracondb "github.com/Owoade/infracon/db"
+	_ "github.com/mattn/go-sqlite3"
+)
 
 type ServerHandler struct {
-	db *sql.DB
+	DB   *sql.DB
+	Repo *infracondb.Repo
 }
 
-func NewServerHandler( db *sql.DB )(*ServerHandler){
+func NewServerHandler() *ServerHandler {
+
+	db, err := infracondb.InitializeDB()
+
+	repo := infracondb.NewRepo(db)
+
+	if err != nil {
+		panic(err)
+	}
+
 	return &ServerHandler{
-		db: db,
+		DB:   db,
+		Repo: repo,
 	}
 }

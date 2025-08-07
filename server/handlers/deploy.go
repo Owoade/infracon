@@ -6,7 +6,7 @@ import (
 )
 
 type DeployApplicationPayload struct {
-	Type string `json:"type"` // "native" or "docker"
+	Type string 		`json:"type"` // "native" or "docker"
 	// If not passed as a pointer struct will never be empty hence failing nil check
 	Docker *DockerConfig `json:"docker_config,omitempty"`
 	Native *NativeConfig `json:"native_config,omitempty"`
