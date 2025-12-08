@@ -2,15 +2,16 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type ApplicationModel struct {
-	ID                 string  `json:"id"`
-	Name               string  `json:"name"`
-	Path               string  `json:"path"`
-	ClientPath         string  `json:"client_path"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Path               string `json:"path"`
+	ClientPath         string `json:"client_path"`
 	DeploymentStrategy *string `json:"deployment_strategy,omitempty"`
 	Type               *string `json:"type,omitempty"`
 	DockerfilePath     *string `json:"dockerfile_path,omitempty"`
@@ -18,8 +19,11 @@ type ApplicationModel struct {
 	RunCommand         *string `json:"run_command,omitempty"`
 	ApplicationPort    *int    `json:"application_port,omitempty"`
 	InternalPort       *int    `json:"internal_port,omitempty"`
-	CreatedAt          string  `json:"created_at"`
-	UpdatedAt          string  `json:"updated_at"`
+	ContainerID        *string `json:"container_id,omitempty"`
+	ImageID            *string `json:"image_id,omitempty"`
+	ApplicationType    *string `json:"application_type,omitempty"`
+	CreatedAt          string `json:"created_at"`
+	UpdatedAt          string `json:"updated_at"`
 }
 
 type Repo struct {
@@ -46,6 +50,9 @@ func InitializeDB() (*sql.DB, error) {
 			run_command TEXT,
 			application_port int,
 			internal_port int,
+			container_id TEXT,
+			image_id TEXT,
+			application_type TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -67,36 +74,35 @@ func NewRepo(db *sql.DB) *Repo {
 
 func (repo *Repo) GetApplicationFromDB(applicationId string) (*ApplicationModel, error) {
 
-	rows, err := repo.DB.Query(`SELECT * FROM apps WHERE id = ?`, applicationId)
-
-	if err != nil {
-		return nil, err
-	}
-
 	var application ApplicationModel
 
-	defer rows.Close()
+	err := repo.DB.QueryRow(
+		`SELECT * FROM apps WHERE id = ?`,
+		applicationId,
+	).Scan(
+		&application.ID,
+		&application.Name,
+		&application.Path,
+		&application.ClientPath,
+		&application.DeploymentStrategy,
+		&application.Type,
+		&application.DockerfilePath,
+		&application.BuildCommand,
+		&application.RunCommand,
+		&application.ApplicationPort,
+		&application.InternalPort,
+		&application.ContainerID,
+		&application.ImageID,
+		&application.ApplicationType,
+		&application.CreatedAt,
+		&application.UpdatedAt,
+	)
 
-	for rows.Next() {
-
-		if err = rows.Scan(
-			&application.ID,
-			&application.Name,
-			&application.Path,
-			&application.ClientPath,
-			&application.DeploymentStrategy,
-			&application.Type,
-			&application.DockerfilePath,
-			&application.BuildCommand,
-			&application.RunCommand,
-			&application.ApplicationPort,
-			&application.InternalPort,
-			&application.CreatedAt,
-			&application.UpdatedAt,
-		); err != nil {
-			return nil, err
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
 		}
-
+		return nil, err
 	}
 
 	return &application, nil
@@ -105,36 +111,35 @@ func (repo *Repo) GetApplicationFromDB(applicationId string) (*ApplicationModel,
 
 func (repo *Repo) GetApplicationFromDBByClientPath(clientPath string) (*ApplicationModel, error) {
 
-	rows, err := repo.DB.Query(`SELECT * FROM apps WHERE client_path = ?`, clientPath)
-
-	if err != nil {
-		return nil, err
-	}
-
 	var application ApplicationModel
 
-	defer rows.Close()
+	err := repo.DB.QueryRow(
+		`SELECT * FROM apps WHERE client_path = ?`,
+		clientPath,
+	).Scan(
+		&application.ID,
+		&application.Name,
+		&application.Path,
+		&application.ClientPath,
+		&application.DeploymentStrategy,
+		&application.Type,
+		&application.DockerfilePath,
+		&application.BuildCommand,
+		&application.RunCommand,
+		&application.ApplicationPort,
+		&application.InternalPort,
+		&application.ContainerID,
+		&application.ImageID,
+		&application.ApplicationType,
+		&application.CreatedAt,
+		&application.UpdatedAt,
+	)
 
-	for rows.Next() {
-
-		if err = rows.Scan(
-			&application.ID,
-			&application.Name,
-			&application.Path,
-			&application.ClientPath,
-			&application.DeploymentStrategy,
-			&application.Type,
-			&application.DockerfilePath,
-			&application.BuildCommand,
-			&application.RunCommand,
-			&application.ApplicationPort,
-			&application.InternalPort,
-			&application.CreatedAt,
-			&application.UpdatedAt,
-		); err != nil {
-			return nil, err
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
 		}
-
+		return nil, err
 	}
 
 	return &application, nil

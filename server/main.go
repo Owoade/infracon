@@ -14,6 +14,7 @@ func Start() {
 	handler := handlers.NewServerHandler()
 
 	http.HandleFunc("/upload", handler.UploadFile)
+	http.HandleFunc("/deploy", handler.DeployApplication)
 	http.HandleFunc("/auth", handler.Authenticate)
 	http.HandleFunc("/connect", handler.Connect)
 	http.HandleFunc("/apps", handler.ListProject)

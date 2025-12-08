@@ -1,0 +1,28 @@
+package handlers
+
+var dockerImageMap map[string]string = map[string]string{
+	"node":       "node:18-alpine",
+	"go":         "golang:1.19-alpine",
+	"python":     "python:3.10-alpine",
+	"ruby":       "ruby:3.1-alpine",
+	"java":       "openjdk:17-alpine",
+	"php":        "php:8.1-alpine",
+	"rust":       "rust:1.64-alpine",
+	"dotnet":     "mcr.microsoft.com/dotnet/sdk:6.0-alpine",
+	"perl":       "perl:5.36-alpine",
+	"scala":      "scala:2.13-alpine",
+	"crystal":    "crystallang/crystal:1.6-alpine",
+	"elixir":     "elixir:1.14-alpine",
+	"erlang":     "erlang:25-alpine",
+	"clojure":    "clojure:1.11-alpine",
+	"haskell":    "haskell:9.2-alpine",
+	"julia":      "julia:1.8-alpine",
+	"r":          "r-base:4.2-alpine",
+	"swift":      "swift:5.7-alpine",
+	"dart":       "dart:2.19-alpine",
+	"flutter":    "flutter:3.3-alpine",
+	"typescript": "node:18-alpine",
+	"javascript": "node:18-alpine",
+	"bash":       "bash:5.1-alpine",
+	"sh":         "bash:5.1-alpine",
+}

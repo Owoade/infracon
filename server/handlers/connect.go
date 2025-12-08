@@ -89,6 +89,8 @@ func (handler *ServerHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 func connectNewProject(handler *ServerHandler, payload ConnectApplicationPayload) (applicationId string, err error) {
 
+	println("Connecting new project")
+
 	applicationID := uuid.New().String()
 	clientPath := payload.Path
 	timestamp := time.Now().UTC()
