@@ -2,7 +2,7 @@ package handlers
 
 var dockerImageMap map[string]string = map[string]string{
 	"node":       "node:18-alpine",
-	"go":         "golang:1.19-alpine",
+	"go":         "golang:1.24-alpine",
 	"python":     "python:3.10-alpine",
 	"ruby":       "ruby:3.1-alpine",
 	"java":       "openjdk:17-alpine",
