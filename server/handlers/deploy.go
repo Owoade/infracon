@@ -84,6 +84,8 @@ func (handler *ServerHandler) DeployApplication(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	home, _ := os.UserHomeDir()
+
 	if body.Type == "native" {
 		dockerImage := dockerImageMap[body.Native.ApplicationType]
 		if dockerImage == "" {
@@ -99,7 +101,6 @@ func (handler *ServerHandler) DeployApplication(w http.ResponseWriter, r *http.R
 			BuildCommand: body.Native.BuildCommand,
 		})
 
-		home, _ := os.UserHomeDir()
 		dockerFilePath := home + "/" + "infracon-apps" + "/" + application.Name + "/" + "Dockerfile.ic"
 		if utils.FileExists(dockerFilePath) {
 			os.Remove(dockerFilePath)
@@ -222,6 +223,110 @@ func (handler *ServerHandler) DeployApplication(w http.ResponseWriter, r *http.R
 
 	}
 
+	if body.Type == "docker" {
+		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		if err != nil {
+			http.Error(w, "unable to initiate docker client", 500)
+			return
+		}
+		defer cli.Close()
+
+		contextPath := fmt.Sprintf("%s/infracon-apps/%s", home, application.ClientPath)
+
+		tar, err := archive.TarWithOptions(contextPath, &archive.TarOptions{})
+		if err != nil {
+			http.Error(w, "unable to create tar", 404)
+			return
+		}
+		defer tar.Close()
+
+		imageName := fmt.Sprintf("infracon-image-%s:latest", application.ID)
+
+		buildOptions := types.ImageBuildOptions{
+			Tags:       []string{imageName},
+			Dockerfile: body.Docker.DockerfilePath, // Name of Dockerfile in context
+			Remove:     true,                       // Remove intermediate containers
+			NoCache:    false,                      // Use cache if available
+			BuildArgs: map[string]*string{
+				"BUILD_DATE": stringPtr(time.Now().Format(time.RFC3339)),
+			},
+		}
+
+		buildResp, err := cli.ImageBuild(context.Background(), tar, buildOptions)
+		fmt.Println(contextPath)
+		if err != nil {
+			log.Println(err)
+			http.Error(w, "unable build docker image", 500)
+			return
+		}
+		defer buildResp.Body.Close()
+
+		// Display build output
+		var buildSuccess bool
+		decoder := json.NewDecoder(buildResp.Body)
+		for {
+			var msg BuildMessage
+			if err := decoder.Decode(&msg); err != nil {
+				if err == io.EOF {
+					break
+				}
+				panic(err)
+			}
+			if msg.Error != "" {
+				fmt.Printf("BUILD ERROR: %s\n", msg.Error)
+				panic(fmt.Errorf("build failed: %s", msg.Error))
+			}
+			if msg.Stream != "" {
+				fmt.Print(msg.Stream)
+				// Check for successful build completion
+				if contains(msg.Stream, "Successfully built") || contains(msg.Stream, "Successfully tagged") {
+					buildSuccess = true
+				}
+			}
+		}
+
+		if !buildSuccess {
+			panic("Build completed but no success message found")
+		}
+
+		containerConfig := &container.Config{
+			Image: imageName,
+			Env: []string{
+				"APP_ENV=production",
+			},
+			ExposedPorts: nat.PortSet{
+				"8080/tcp": struct{}{},
+			},
+		}
+
+		hostConfig := &container.HostConfig{
+			PortBindings: nat.PortMap{
+				"8080/tcp": []nat.PortBinding{
+					{
+						HostIP:   "0.0.0.0",
+						HostPort: "8080",
+					},
+				},
+			},
+			AutoRemove: true,
+		}
+
+		// Create the container
+		resp, err := cli.ContainerCreate(context.Background(), containerConfig, hostConfig, nil, nil, fmt.Sprintf("container-%s", application.ClientPath))
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println(resp)
+
+		if err := cli.ContainerStart(context.Background(), resp.ID, container.StartOptions{}); err != nil {
+			panic(err)
+		}
+
+		fmt.Printf("Container started successfully\n")
+		fmt.Printf("Access app at http://localhost:8080\n")
+	}
+
 }
 
 func stringPtr(s string) *string {
@@ -235,7 +340,20 @@ func generateDockerfileContent(payload GenerateDockerfileContent) []string {
 	content = append(content, "COPY . .\n")
 	content = append(content, fmt.Sprintf("RUN %s\n", payload.BuildCommand))
 	content = append(content, fmt.Sprintf("EXPOSE %d\n", payload.InternalPort))
-	content = append(content, fmt.Sprintf("CMD [%s]\n", strings.Join(strings.Split(payload.RunCommand, " "), ", ")))
+	content = append(
+		content,
+		fmt.Sprintf(
+			"CMD [%s]\n",
+			strings.Join(
+				utils.Map(
+					strings.Split(payload.RunCommand, " "),
+					func(cmd string) string {
+						return fmt.Sprintf(`"%s"`, cmd)
+					},
+				),
+				", ",
+			),
+		))
 	return content
 }
 
