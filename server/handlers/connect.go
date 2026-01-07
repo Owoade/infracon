@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -19,71 +18,6 @@ type ConnectApplicationPayload struct {
 }
 
 func (handler *ServerHandler) Connect(w http.ResponseWriter, r *http.Request) {
-
-	if validAuth, err := VerifyToken(r); !validAuth {
-		http.Error(w, err, 400)
-		return
-	}
-
-	var body ConnectApplicationPayload
-
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Error decoding request body", 400)
-		return
-	}
-
-	if body.Type == "" {
-		http.Error(w, "`type` is required", 400)
-		return
-	}
-
-	if body.Type != "new" || body.Type == "existing" {
-		http.Error(w, "`type` must be either of value 'new' or 'existing'", 400)
-		return
-	}
-
-	if body.Type == "existing" && body.ApplicationID == "" {
-		http.Error(w, "`application_id` is required", 400)
-		return
-	}
-
-	if body.Type == "new" && body.Name == "" {
-		http.Error(w, "`name` is required", 400)
-		return
-	}
-
-	if body.Type == "new" && body.Path == "" {
-		http.Error(w, "`path` is required", 400)
-		return
-	}
-
-	if body.Type == "new" {
-		applicationID, err := connectNewProject(handler, body)
-		if err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-
-		response := map[string]any{
-			"application_id": applicationID,
-		}
-
-		json.NewEncoder(w).Encode(response)
-
-		return
-
-	}
-
-	if err := connectExistingProject(handler, body.ApplicationID, body.Path); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-
-	response := map[string]any{
-		"application_id": body.ApplicationID,
-	}
-
-	json.NewEncoder(w).Encode(response)
 
 }
 

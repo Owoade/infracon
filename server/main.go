@@ -15,7 +15,9 @@ func Start() {
 
 	http.HandleFunc("/upload", handler.UploadFile)
 	http.HandleFunc("/deploy", handler.DeployApplication)
-	http.HandleFunc("/auth", handler.Authenticate)
+	http.HandleFunc("/auth/login", handler.Login)
+	http.HandleFunc("/auth/signup", handler.SignUp)
+	http.HandleFunc("/auth/password", handler.ChangePassword)
 	http.HandleFunc("/connect", handler.Connect)
 	http.HandleFunc("/apps", handler.ListProject)
 

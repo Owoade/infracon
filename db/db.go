@@ -3,32 +3,10 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
-
-type ApplicationModel struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Path               string `json:"path"`
-	ClientPath         string `json:"client_path"`
-	DeploymentStrategy *string `json:"deployment_strategy,omitempty"`
-	Type               *string `json:"type,omitempty"`
-	DockerfilePath     *string `json:"dockerfile_path,omitempty"`
-	BuildCommand       *string `json:"build_command,omitempty"`
-	RunCommand         *string `json:"run_command,omitempty"`
-	ApplicationPort    *int    `json:"application_port,omitempty"`
-	InternalPort       *int    `json:"internal_port,omitempty"`
-	ContainerID        *string `json:"container_id,omitempty"`
-	ImageID            *string `json:"image_id,omitempty"`
-	ApplicationType    *string `json:"application_type,omitempty"`
-	CreatedAt          string `json:"created_at"`
-	UpdatedAt          string `json:"updated_at"`
-}
-
-type Repo struct {
-	DB *sql.DB
-}
 
 func InitializeDB() (*sql.DB, error) {
 
@@ -56,6 +34,13 @@ func InitializeDB() (*sql.DB, error) {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS users (
+			email TEXT NOT NULL,
+			password TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)
     `
 
 	_, err = db.Exec(sqlStmt)
@@ -185,4 +170,45 @@ func (repo *Repo) GetApplicationsFromDB() (*[]ApplicationModel, error) {
 
 	return &applications, nil
 
+}
+
+func (repo *Repo) GetUser(email string) (*UserModel, error) {
+	var user UserModel
+	if err := repo.DB.QueryRow(
+		`SELECT email, password FROM users where email = $1;`,
+		email,
+	).Scan(&user.Email, &user.Password); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &user, nil
+}
+
+func (repo *Repo) CreateUser(email, password string) error {
+	_, err := repo.DB.Exec(
+		`
+		INSERT INTO users (email, password, created_at, updated_at)
+		VALUES ($1, $2, $3, $4)
+		`,
+		email,
+		password,
+		time.Now().UTC(),
+		time.Now().UTC(),
+	)
+	return err
+}
+
+func (repo *Repo) UpdateUserPassword(email, password string) error {
+	_, err := repo.DB.Exec(
+		`
+		UPDATE users SET password = $1, updated_at = $2 WHERE email = $3
+		`,
+		password,
+		time.Now().UTC(),
+		email,
+	)
+	return err
 }

@@ -1,83 +1,339 @@
 package handlers
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
-	"github.com/Owoade/infracon/config"
+	"github.com/Owoade/infracon/db"
+	"github.com/Owoade/infracon/server/utils"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
+type Claims struct {
+	Email string `json:"email"`
+	jwt.RegisteredClaims
+}
+
 type AuthPayload struct {
-	Key string `json:"access_key"`
+	Otp string `json:"otp"`
+	db.UserModel
 }
 
 const message = "AUTH"
 
-func (handler *ServerHandler) Authenticate(w http.ResponseWriter, r *http.Request) {
+func (handler *ServerHandler) Login(w http.ResponseWriter, r *http.Request) {
+	var body db.UserModel
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Invalid payload",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
+
+	user, err := handler.Repo.GetUser(body.Email)
+	if err != nil {
+		log.Println(err)
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Error getting user info",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
+
+	if user == nil {
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusNotFound,
+				Message:    "User not found",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
+
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(body.Password))
+	if err != nil {
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Invalid passeord",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
+
+	claims := &Claims{
+		Email: body.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 30 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "Infracon",
+		},
+	}
+
+	key := []byte(os.Getenv("JWT_SECRET"))
+
+	signing := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token, err := signing.SignedString(key)
+
+	utils.RespondToCLient(
+		w,
+		utils.ResponsePayload{
+			StatusCode: http.StatusOK,
+			Message:    "OK",
+			Status:     true,
+			Data:       token,
+		},
+	)
+
+}
+
+func (handler *ServerHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 	var body AuthPayload
-	err := json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Invalid payload",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
 
-	fmt.Println(body)
+	valid, err := validateOTP(body.Otp)
+	if err != nil || !valid {
+		log.Println(err)
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Invalid OTP",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
 
+	user, err := handler.Repo.GetUser(body.Email)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		log.Println(err)
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Error getting user info",
+				Status:     false,
+				Data:       nil,
+			},
+		)
 		return
 	}
 
-	if body.Key == "" {
-		http.Error(w, "access_key is required", 400)
+	if user != nil {
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "User already exists",
+				Status:     false,
+				Data:       nil,
+			},
+		)
 		return
 	}
 
-	accessKey, err := config.GetCredentials("access_key")
+	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		log.Println(err)
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Error processing request",
+				Status:     false,
+				Data:       nil,
+			},
+		)
 		return
 	}
 
-	if accessKey != body.Key {
-		http.Error(w, "Invalid access key", 400)
+	password := string(hash)
+	if err = handler.Repo.CreateUser(
+		body.Email,
+		password,
+	); err != nil {
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Error saving user details",
+				Status:     false,
+				Data:       nil,
+			},
+		)
 		return
 	}
 
-	token := signToken(accessKey, message)
-
-	w.Header().Set("Content-Type", "application/json")
-
-	response := map[string]string{
-		"token": token,
+	claims := &Claims{
+		Email: body.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 30 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "Infracon",
+		},
 	}
 
-	json.NewEncoder(w).Encode(response)
+	key := []byte(os.Getenv("JWT_SECRET"))
+
+	signing := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token, err := signing.SignedString(key)
+
+	utils.RespondToCLient(
+		w,
+		utils.ResponsePayload{
+			StatusCode: http.StatusOK,
+			Message:    "Operation successful",
+			Status:     true,
+			Data:       token,
+		},
+	)
+
+	deleteOTPFile()
 
 }
 
-func VerifyToken(r *http.Request) (bool, string) {
-	authHeader := r.Header.Get("Authorization")
-	accessKey, err := config.GetCredentials("access_key")
+func (handler *ServerHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	var body AuthPayload
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Invalid payload",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
 
+	valid, err := validateOTP(body.Otp)
+	if err != nil || !valid {
+		log.Println(err)
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Invalid OTP",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 	if err != nil {
-		return false, "Acces key is not set"
+		log.Println(err)
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Error processing request",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
 	}
 
-	if !verifyToken(accessKey, message, authHeader) {
-		return false, "Invalid token"
+	password := string(hash)
+	if err = handler.Repo.UpdateUserPassword(
+		body.Email,
+		password,
+	); err != nil {
+		log.Println(err)
+		utils.RespondToCLient(
+			w,
+			utils.ResponsePayload{
+				StatusCode: http.StatusBadRequest,
+				Message:    "Error saving user details",
+				Status:     false,
+				Data:       nil,
+			},
+		)
+		return
 	}
 
-	return true, ""
+	utils.RespondToCLient(
+		w,
+		utils.ResponsePayload{
+			StatusCode: http.StatusOK,
+			Message:    "Password changed",
+			Status:     true,
+		},
+	)
+
+	deleteOTPFile()
 }
 
-func signToken(accessKey string, message string) string {
-	h := hmac.New(sha256.New, []byte(accessKey))
-	h.Write([]byte(message))
-	return hex.EncodeToString(h.Sum(nil))
+func validateOTP(inputOTP string) (bool, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return false, err
+	}
+
+	otpPath := filepath.Join(homeDir, "infracon-apps", "otp.txt")
+
+	data, err := os.ReadFile(otpPath)
+	if err != nil {
+		return false, err
+	}
+
+	storedOTP := strings.TrimSpace(string(data))
+	inputOTP = strings.TrimSpace(inputOTP)
+
+	return storedOTP == inputOTP, nil
 }
 
-func verifyToken(accessKey, message, token string) bool {
-	expected := signToken(accessKey, message)
-	return hmac.Equal([]byte(expected), []byte(token))
+func deleteOTPFile() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	otpPath := filepath.Join(homeDir, "infracon-apps", "otp.txt")
+
+	// If file doesn't exist, treat as success
+	if _, err := os.Stat(otpPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	return os.Remove(otpPath)
 }
