@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -38,6 +39,7 @@ func InitializeDB() (*sql.DB, error) {
 		CREATE TABLE IF NOT EXISTS users (
 			email TEXT NOT NULL,
 			password TEXT NOT NULL,
+			is_root INTEGER CHECK(is_root IN (0,1)) DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)
@@ -175,9 +177,9 @@ func (repo *Repo) GetApplicationsFromDB() (*[]ApplicationModel, error) {
 func (repo *Repo) GetUser(email string) (*UserModel, error) {
 	var user UserModel
 	if err := repo.DB.QueryRow(
-		`SELECT email, password FROM users where email = $1;`,
+		`SELECT email, password, is_root FROM users where email = $1;`,
 		email,
-	).Scan(&user.Email, &user.Password); err != nil {
+	).Scan(&user.Email, &user.Password, &user.IsRoot); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -187,18 +189,35 @@ func (repo *Repo) GetUser(email string) (*UserModel, error) {
 	return &user, nil
 }
 
-func (repo *Repo) CreateUser(email, password string) error {
+func (repo *Repo) CreateUser(email, password string) (bool, error) {
+	var existingUsersCount int
+	if err := repo.DB.QueryRow(
+		`SELECT COUNT(*) FROM users`,
+	).Scan(&existingUsersCount); err != nil {
+		return false, err
+	}
+
+	isRootUser := 0
+	if existingUsersCount == 0 {
+		isRootUser = 1
+	}
+
 	_, err := repo.DB.Exec(
 		`
-		INSERT INTO users (email, password, created_at, updated_at)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO users (email, password, is_root, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5)
 		`,
 		email,
 		password,
+		isRootUser,
 		time.Now().UTC(),
 		time.Now().UTC(),
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+
+	return existingUsersCount == 0, nil
 }
 
 func (repo *Repo) UpdateUserPassword(email, password string) error {

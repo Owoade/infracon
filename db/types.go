@@ -5,6 +5,7 @@ import "database/sql"
 type UserModel struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	IsRoot   bool   `json:"is_root"`
 }
 
 type ApplicationModel struct {

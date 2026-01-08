@@ -16,7 +16,8 @@ import (
 )
 
 type Claims struct {
-	Email string `json:"email"`
+	Email      string `json:"email"`
+	IsRootUser bool   `json:"is_root"`
 	jwt.RegisteredClaims
 }
 
@@ -85,7 +86,8 @@ func (handler *ServerHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := &Claims{
-		Email: body.Email,
+		Email:      body.Email,
+		IsRootUser: user.IsRoot,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 30 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -184,10 +186,13 @@ func (handler *ServerHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	password := string(hash)
-	if err = handler.Repo.CreateUser(
+	isRootUser, err := handler.Repo.CreateUser(
 		body.Email,
 		password,
-	); err != nil {
+	)
+
+	if err != nil {
+		log.Println(err)
 		utils.RespondToCLient(
 			w,
 			utils.ResponsePayload{
@@ -201,7 +206,8 @@ func (handler *ServerHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := &Claims{
-		Email: body.Email,
+		Email:      body.Email,
+		IsRootUser: isRootUser,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 30 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -220,7 +226,10 @@ func (handler *ServerHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 			StatusCode: http.StatusOK,
 			Message:    "Operation successful",
 			Status:     true,
-			Data:       token,
+			Data: map[string]any{
+				"token":   token,
+				"is_root": isRootUser,
+			},
 		},
 	)
 
