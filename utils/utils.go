@@ -105,57 +105,56 @@ func IsZipFile(file *multipart.FileHeader) error {
 	return nil
 }
 
-func UnzipFileFromMultipartFile(fh *multipart.FileHeader, dest string) error {
+func UnzipFileFromMultipartFile(fh *multipart.FileHeader, dest string) (clientFolders []string, err error) {
 	f, err := fh.Open()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 
 	buf, err := io.ReadAll(f)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	r := bytes.NewReader(buf)
 	zr, err := zip.NewReader(r, int64(len(buf)))
 	if err != nil {
-		return err
+		return nil, err
 	}
+
+	topLevelDirectories := []string{}
 
 	for _, f := range zr.File {
 		outPath := filepath.Join(dest, f.Name)
-		if !strings.HasPrefix(outPath, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path: %s", outPath)
-		}
 
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(outPath, f.Mode()); err != nil {
-				return err
+				return nil, err
 			}
-		}
 
-		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-			return err
-		}
+			if len(topLevelDirectories) == 0 {
+				topLevelDirectories = append(topLevelDirectories, strings.Split(f.Name, string(filepath.Separator))[0])
+			} else {
+				lastDir := topLevelDirectories[len(topLevelDirectories)-1]
+				if !isSubPath(lastDir, f.Name){
+					topLevelDirectories = append(topLevelDirectories, f.Name)
+				}
+			}
+		} else {
+			newFile, _ := os.Create(outPath)
 
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		defer rc.Close()
+			rc, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer rc.Close()
 
-		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
+			io.Copy(newFile, rc)
 		}
-		defer out.Close()
-
-		_, err = io.Copy(out, rc)
-		return err
 	}
 
-	return nil
+	return topLevelDirectories, nil
 }
 
 func StringValidator(valueName, value string, config ValidatorConfig) error {
@@ -186,4 +185,14 @@ func Contains[T comparable](slice []T, element T) bool {
 	}
 
 	return false
+}
+
+func isSubPath(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+
+	return !strings.HasPrefix(rel, "..")
+
 }

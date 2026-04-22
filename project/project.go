@@ -1,16 +1,20 @@
 package project
 
 import (
+	"archive/zip"
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"infracon/db"
 	"infracon/utils"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -50,28 +54,17 @@ func CreateProject(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  true,
 		"message": "Project created",
+		"data": gin.H{
+			"slug": uniqueSlug,
+		},
 	})
 
 }
 
-func AddProjectSource(c *gin.Context) {
-	projectId := c.PostForm("project_id")
-	source := c.PostForm("source")
-
-	if err := utils.StringValidator("project_id", projectId, utils.ValidatorConfig{
-		NotEmpty:  true,
-		MaxLength: 16,
-	}); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"message": err,
-			"status":  false,
-		})
-		return
-	}
-
-	if err := utils.StringValidator("source", source, utils.ValidatorConfig{
-		NotEmpty:       true,
-		ExpectedValues: []string{"github", "zip-upload"},
+func GetProject(c *gin.Context) {
+	slug := c.Param("slug")
+	if err := utils.StringValidator("slug", slug, utils.ValidatorConfig{
+		NotEmpty: true,
 	}); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"message": err,
@@ -89,9 +82,73 @@ func AddProjectSource(c *gin.Context) {
 		})
 		return
 	}
+	var project Project
+	if err := db.QueryRow("SELECT name, type, project_path, env, github_repo FROM projects WHERE slug = $1", slug).
+		Scan(&project.Name, &project.Type, &project.ProjectPath, &project.Env, &project.GithubRepo); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"message": "Project not found!",
+				"status":  false,
+			})
+			return
+		} else {
+			log.Printf("project lookup query error: %s", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "Something went wrong",
+				"status":  false,
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": true,
+		"data": gin.H{
+			"project": project,
+		},
+	})
+
+}
+
+func AddProjectSource(c *gin.Context) {
+	projectId := c.PostForm("project_id")
+	source := c.PostForm("source")
+
+	if err := utils.StringValidator("project_id", projectId, utils.ValidatorConfig{
+		NotEmpty:  true,
+		MaxLength: 16,
+	}); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": err.Error(),
+			"status":  false,
+		})
+		return
+	}
+
+	if err := utils.StringValidator("source", source, utils.ValidatorConfig{
+		NotEmpty:       true,
+		ExpectedValues: []string{"github", "zip-upload"},
+	}); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": err.Error(),
+			"status":  false,
+		})
+		return
+	}
+
+	db, err := db.GetDatabase()
+	if err != nil {
+		log.Printf("db error: %s", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+		})
+		return
+	}
 
 	var slug string
-	if err := db.QueryRow("SELECT slug FROM projects WHERE id = $1", projectId).Scan(&slug); err != nil {
+	var existingProjectPath *string
+	if err := db.QueryRow("SELECT slug, project_path FROM projects WHERE id = $1", projectId).Scan(&slug, &existingProjectPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"message": "Project not found!",
@@ -117,12 +174,22 @@ func AddProjectSource(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"message": "Error uploading zip",
 				"status":  false,
-				"details": err,
+				"details": err.Error(),
 			})
 			return
 		}
 
-		if err := utils.UnzipFileFromMultipartFile(fileHeader, destination); err != nil {
+		if err := utils.IsZipFile(fileHeader); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "Invalid file",
+				"status":  false,
+				"details": err.Error(),
+			})
+			return
+		}
+
+		clientFolders, err := utils.UnzipFileFromMultipartFile(fileHeader, destination)
+		if err != nil {
 			log.Println(err)
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"message": "Error uploading zip",
@@ -131,11 +198,211 @@ func AddProjectSource(c *gin.Context) {
 			return
 		}
 
+		if len(clientFolders) == 1 {
+			clientFolder := clientFolders[0]
+			destination = filepath.Join(destination, clientFolder)
+
+			if err := db.QueryRow("UPDATE projects SET project_path = $1 WHERE id = $2 RETURNING id", destination, projectId).Scan(new(int)); err != nil {
+				log.Printf("update query err: %s", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"message": "Error uploading zip",
+					"status":  false,
+				})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"status":  true,
+				"message": "Source added",
+				"data": gin.H{
+					"top_level_folders": clientFolders,
+				},
+			})
+			return
+
+		} else {
+			if err := db.QueryRow("UPDATE projects SET project_path = $1, top_level_directories = $2 WHERE id = $3 RETURNING id", destination, strings.Join(clientFolders, ","), projectId).Scan(new(int)); err != nil {
+				log.Printf("update query err: %s", err)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"message": "Error uploading zip",
+					"status":  false,
+				})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"status":  true,
+				"message": "Source added",
+				"data": gin.H{
+					"next_action": gin.H{
+						"message":           "YYour ZIP file contains multiple top-level folders. Please choose the correct one.",
+						"top_level_folders": clientFolders,
+					},
+				},
+			})
+			return
+		}
+
 	}
 
 	if source == "github" {
+		repo := c.PostForm("repo")
+		owner := c.PostForm("owner")
+		branch := c.PostForm("branch")
+
+		if err := utils.StringValidator("repo", repo, utils.ValidatorConfig{
+			NotEmpty: true,
+		}); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"status":  false,
+				"message": err.Error(),
+			})
+			return
+		}
+
+		if err := utils.StringValidator("owner", owner, utils.ValidatorConfig{
+			NotEmpty: true,
+		}); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"status":  false,
+				"message": err.Error(),
+			})
+			return
+		}
+
+		if err := utils.StringValidator("branch", branch, utils.ValidatorConfig{
+			NotEmpty: true,
+		}); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"status":  false,
+				"message": err.Error(),
+			})
+			return
+		}
+
+		var token string
+		if err := db.QueryRow("SELECT token FROM github_tokens").Scan(&token); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{
+					"message": "Github token not found!",
+					"status":  false,
+				})
+				return
+			} else {
+				log.Printf("query token error: %s", err)
+				c.JSON(http.StatusOK, gin.H{
+					"message": "Something went wrong",
+					"status":  false,
+				})
+				return
+			}
+		}
+
+		payload := PullfromGithub{
+			Repo:        repo,
+			Owner:       owner,
+			Ref:         branch,
+			AccessToken: token,
+			Destination: destination,
+		}
+
+		commitHash, err := pullFromGithub(payload)
+		if err != nil {
+			log.Printf("github repo pull error: %s", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "Something went wrong",
+				"status":  false,
+				"details": gin.H{
+					"message":        err.Error(),
+					"possible_cause": "Invalid github token or repository name, owner or branch",
+				},
+			})
+			return
+		}
+		clientFolder := fmt.Sprintf("%s-%s-%s", owner, repo, commitHash)
+		destination = filepath.Join(destination, clientFolder)
+		githubRepo := map[string]string{
+			"name":   repo,
+			"owner":  owner,
+			"branch": branch,
+		}
+		bytes, _ := json.Marshal(githubRepo)
+		marshaledRepo := string(bytes)
+
+		if err := db.QueryRow("UPDATE projects SET project_path = $1, github_repo = $2 WHERE id = $3 RETURNING id", destination, marshaledRepo, projectId).Scan(new(int)); err != nil {
+			log.Printf("update query err: %s", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "Error uploading zip",
+				"status":  false,
+			})
+			return
+		}
+
+		println("existingProjectPath", *existingProjectPath)
+		println("destination", destination)
+		if existingProjectPath != nil && destination != *existingProjectPath {
+			go os.RemoveAll(*existingProjectPath)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":  true,
+			"message": "Source Added",
+		})
 
 	}
+
+}
+
+func SetEnvironmentVariable(c *gin.Context) {
+	var body SetEnvironmentVariablePayload
+	if err := c.ShouldBindBodyWithJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":  false,
+			"message": "Invalid payload",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	db, err := db.GetDatabase()
+	if err != nil {
+		log.Printf("db error: %s", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+		})
+		return
+	}
+
+	var project_path string
+	if err := db.QueryRow("SELECT project_path FROM projects WHERE id = $1", body.ProjectId).Scan(&project_path); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"message": "Project not found!",
+				"status":  false,
+			})
+			return
+		} else {
+			log.Printf("project lookup query error: %s", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"message": "Something went wrong",
+				"status":  false,
+			})
+			return
+		}
+	}
+
+	if err := db.QueryRow("UPDATE projects SET env = $1 WHERE id = $2 RETURNING id", body.Env, body.ProjectId).Scan(new(int)); err != nil {
+		log.Printf("env write error: %s", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  true,
+		"message": "Environment variables set!",
+	})
 
 }
 
@@ -176,7 +443,7 @@ func AddGithubToken(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  false,
 			"message": "Invalid payload",
-			"details": err,
+			"details": err.Error(),
 		})
 		return
 	}
@@ -186,7 +453,7 @@ func AddGithubToken(c *gin.Context) {
 		MinLength: 16,
 	}); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"message": err,
+			"message": err.Error(),
 			"status":  false,
 		})
 		return
@@ -212,7 +479,7 @@ func AddGithubToken(c *gin.Context) {
 	}
 
 	var existingTokenId int
-	if err := db.QueryRow("SELECT id FROM github_tokens").Scan(&existingTokenId); err != nil {
+	if err := db.QueryRow("SELECT user_id FROM github_tokens").Scan(&existingTokenId); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("query error: %s", err)
 			c.JSON(http.StatusOK, gin.H{
@@ -224,7 +491,7 @@ func AddGithubToken(c *gin.Context) {
 	}
 
 	if existingTokenId > 0 {
-		if err := db.QueryRow("UPDATE github_tokens SET token = $1 WHERE id = $2 RETURNING id", body.Token, existingTokenId).Scan(new(int)); err != nil {
+		if err := db.QueryRow("UPDATE github_tokens SET token = $1 WHERE user_id = $2 RETURNING user_id", body.Token, existingTokenId).Scan(new(int)); err != nil {
 			log.Printf("update query error: %s", err)
 			c.JSON(http.StatusOK, gin.H{
 				"message": "Something went wrong",
@@ -233,9 +500,9 @@ func AddGithubToken(c *gin.Context) {
 			return
 		}
 	} else {
-		if err := db.QueryRow("INSERT INTO github_tokens (token) VALUES ($1) RETURNING id", body.Token, existingTokenId).Scan(new(int)); err != nil {
+		if err := db.QueryRow("INSERT INTO github_tokens (user_id, token) VALUES (1,$1) RETURNING user_id", body.Token, existingTokenId).Scan(new(int)); err != nil {
 			log.Printf("insert query error: %s", err)
-			c.JSON(http.StatusOK, gin.H{
+			c.JSON(http.StatusInternalServerError, gin.H{
 				"message": "Something went wrong",
 				"status":  false,
 			})
@@ -256,7 +523,7 @@ func GetGithubRepos(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status":  false,
 			"message": "Invalid payload",
-			"details": err,
+			"details": err.Error(),
 		})
 		return
 	}
@@ -273,7 +540,13 @@ func GetGithubRepos(c *gin.Context) {
 
 	var token string
 	if err := db.QueryRow("SELECT token FROM github_tokens").Scan(&token); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"message": "Github token not found!",
+				"status":  false,
+			})
+			return
+		} else {
 			log.Printf("query token error: %s", err)
 			c.JSON(http.StatusOK, gin.H{
 				"message": "Something went wrong",
@@ -320,10 +593,12 @@ func GetGithubRepos(c *gin.Context) {
 
 	if resp.StatusCode != 200 {
 		log.Printf("http error 3: %s", err)
+		var response map[string]string
+		json.NewDecoder(resp.Body).Decode(&response)
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Something went wrong",
 			"status":  false,
-			"details": err,
+			"details": fmt.Sprintf("Github error: %s", response["message"]),
 		})
 		return
 	}
@@ -346,6 +621,103 @@ func GetGithubRepos(c *gin.Context) {
 		"meta": gin.H{
 			"page":     body.Page,
 			"per_page": body.PerPage,
+		},
+	})
+
+}
+
+func GetGithubRepoBranches(c *gin.Context) {
+	var body GetGithubBranchesPayload
+	if err := c.ShouldBindBodyWithJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":  false,
+			"message": "Invalid payload",
+			"details": err,
+		})
+		return
+	}
+
+	db, err := db.GetDatabase()
+	if err != nil {
+		log.Printf("db error: %s", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+		})
+		return
+	}
+
+	var token string
+	if err := db.QueryRow("SELECT token FROM github_tokens").Scan(&token); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"message": "Github token not found!",
+				"status":  false,
+			})
+			return
+		} else {
+			log.Printf("query token error: %s", err)
+			c.JSON(http.StatusOK, gin.H{
+				"message": "Something went wrong",
+				"status":  false,
+			})
+			return
+		}
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/branches", body.Owner, body.RepoName)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("http error 1: %s", err)
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+		})
+		return
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("http error 2: %s", err)
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		log.Printf("http error 3: %s", err)
+		var response map[string]string
+		json.NewDecoder(resp.Body).Decode(&response)
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+			"details": fmt.Sprintf("Github error: %s", response["message"]),
+		})
+		return
+	}
+
+	var branches []FetchGithubRepoBranchesAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&branches); err != nil {
+		log.Printf("json encoding error: %s", err)
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Something went wrong",
+			"status":  false,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": true,
+		"data": gin.H{
+			"branches": branches,
 		},
 	})
 
@@ -377,47 +749,80 @@ func validateGithubToken(token string) error {
 	return nil
 }
 
-// func CreateProject(c *gin.Context) {
-// 	source := c.PostForm("source")
-// 	projectName := c.PostForm("name")
-// 	if projectName == "" || utf8.RuneCountInString(projectName) > 5 {
-// 		c.JSON(http.StatusBadRequest, gin.H{
-// 			"status":  false,
-// 			"message": "Project cannot be empty or less than 5 characters",
-// 		})
-// 		return
-// 	}
+func pullFromGithub(p PullfromGithub) (commitHash string, err error) {
+	if p.AccessToken == "" {
+		return "", errors.New("GITHUB_ACCESS_TOKEN is not set")
+	}
 
-// 	if source != "github" && source != "zip-upload" {
-// 		c.JSON(http.StatusBadRequest, gin.H{
-// 			"status":  false,
-// 			"message": "Invalid source type, expecting 'zip-upload' or 'github'",
-// 		})
-// 		return
-// 	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/zipball/%s", p.Owner, p.Repo, p.Ref)
 
-// 	if source == "zip-upload" {
-// 		file, err := c.FormFile("file")
-// 		if err != nil {
-// 			log.Println(err)
-// 			c.JSON(http.StatusBadRequest, gin.H{
-// 				"status":  false,
-// 				"message": "Zip upload error",
-// 			})
-// 			return
-// 		}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
 
-// 		if err := utils.IsZipFile(file); err != nil {
-// 			c.JSON(http.StatusBadRequest, gin.H{
-// 				"status":  false,
-// 				"message": "Zip upload error",
-// 				"details": err,
-// 			})
-// 			return
-// 		}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+p.AccessToken)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-// 		home, _ := os.UserHomeDir()
-// 		destination := fmt.Sprintf("%s/infracon-apps/%s", home, )
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
 
-// 	}
-// }
+	if resp.StatusCode != 200 {
+		var response map[string]string
+		json.NewDecoder(resp.Body).Decode(&response)
+		return "", fmt.Errorf("Github error: %s", response["message"])
+	}
+
+	var buf bytes.Buffer
+	size, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), size)
+	if err != nil {
+		return "", err
+	}
+
+	for _, f := range r.File {
+		fpath := filepath.Join(p.Destination, f.Name)
+
+		if !strings.HasPrefix(fpath, filepath.Clean(p.Destination)+string(os.PathSeparator)) {
+			return "", fmt.Errorf("illegal file path: %s", fpath)
+		}
+
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(fpath, os.ModePerm)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			return "", err
+		}
+
+		inFile, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			inFile.Close()
+			return "", err
+		}
+
+		_, err = io.Copy(outFile, inFile)
+		inFile.Close()
+		outFile.Close()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return r.Comment, nil
+}
