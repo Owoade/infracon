@@ -167,6 +167,7 @@ func AddProjectSource(c *gin.Context) {
 
 	home, _ := os.UserHomeDir()
 	destination := filepath.Join(home, "infracon-apps", slug)
+	tempDestination := filepath.Join(home, "infracon-apps", fmt.Sprintf("temp-%d", time.Now().UnixMilli()))
 
 	if source == "zip-upload" {
 		fileHeader, err := c.FormFile("file")
@@ -188,7 +189,7 @@ func AddProjectSource(c *gin.Context) {
 			return
 		}
 
-		clientFolders, err := utils.UnzipFileFromMultipartFile(fileHeader, destination)
+		clientFolders, err := utils.UnzipFileFromMultipartFile(fileHeader, tempDestination)
 		if err != nil {
 			log.Println(err)
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -197,6 +198,9 @@ func AddProjectSource(c *gin.Context) {
 			})
 			return
 		}
+
+		os.RemoveAll(destination)
+		os.Rename(tempDestination, destination)
 
 		if len(clientFolders) == 1 {
 			clientFolder := clientFolders[0]
@@ -302,7 +306,7 @@ func AddProjectSource(c *gin.Context) {
 			Owner:       owner,
 			Ref:         branch,
 			AccessToken: token,
-			Destination: destination,
+			Destination: tempDestination,
 		}
 
 		commitHash, err := pullFromGithub(payload)
@@ -318,6 +322,10 @@ func AddProjectSource(c *gin.Context) {
 			})
 			return
 		}
+
+		os.RemoveAll(destination)
+		os.Rename(tempDestination, destination)
+
 		clientFolder := fmt.Sprintf("%s-%s-%s", owner, repo, commitHash)
 		destination = filepath.Join(destination, clientFolder)
 		githubRepo := map[string]string{
