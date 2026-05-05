@@ -3,8 +3,13 @@ package project
 import "time"
 
 type CreateProjectPayload struct {
-	Name string `json:"name" binding:"required"`
-	Type string `json:"type" binding:"required"`
+	Name                string `form:"name" binding:"required"`
+	Type                string `form:"type" binding:"required"`
+	RepoOwner           string `form:"repo_owner"`
+	RepoName            string `form:"repo_name"`
+	RepoRef             string `form:"repo_ref"`
+	UseCustomDockerfile string `form:"use_custom_docker_file"`
+	Env                 string `form:"env"`
 }
 
 type AddGithubTokenPayload struct {

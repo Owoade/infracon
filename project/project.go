@@ -1,15 +1,12 @@
 package project
 
 import (
-	"archive/zip"
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"infracon/db"
 	"infracon/utils"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -21,43 +18,123 @@ import (
 )
 
 func CreateProject(c *gin.Context) {
-	var body CreateProjectPayload
-	if err := c.ShouldBindBodyWithJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, map[string]any{
 			"status":  false,
-			"message": "Invalid payload",
-			"details": err,
+			"message": "SSE not supported",
 		})
 		return
 	}
 
-	db, err := db.GetDatabase()
-	if err != nil {
-		log.Printf("db error: %s", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Something went wrong",
-			"status":  false,
-		})
+	var body CreateProjectPayload
+	if err := c.ShouldBind(&body); err != nil {
+		utils.WriteSSEData([]string{"ERROR", err.Error()}, c, flusher)
 		return
 	}
 
 	uniqueSlug := fmt.Sprintf("%s-%d", utils.Slugify(body.Name), time.Now().UnixMilli())
-	if err := db.QueryRow("INSERT INTO projects (name, slug, type) VALUES ($1, $2, $3) RETURNING id", body.Name, uniqueSlug, body.Type).Scan(new(int)); err != nil {
-		log.Printf("query error: %s", err)
-		c.JSON(http.StatusOK, gin.H{
-			"message": "Something went wrong",
-			"status":  false,
-		})
+	projectPath := filepath.Join("infracon-apps", uniqueSlug)
+
+	var useCustomDockerfile = body.UseCustomDockerfile == "true"
+
+	if body.Type == "zip-upload" {
+		file, err := c.FormFile("file")
+		if err != nil {
+			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error uploading file: %s", err)}, c, flusher)
+			return
+		}
+
+		folders, err := utils.UnzipFileFromMultipartFile(file, projectPath)
+		if err != nil {
+			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error unziping file: %s", err)}, c, flusher)
+			return
+		}
+
+		if len(folders) != 1 {
+			os.RemoveAll(projectPath)
+			utils.WriteSSEData([]string{"ERROR", "The uploaded zip file must contain exactly one root folder, but none or multiple were found."}, c, flusher)
+			return
+		}
+
+		projectPath = filepath.Join(projectPath, folders[0])
+	}
+
+	if body.Type == "github" {
+		if body.RepoName == "" {
+			utils.WriteSSEData([]string{"ERROR", "`repo_name` is required"}, c, flusher)
+			return
+		}
+
+		if body.RepoOwner == "" {
+			utils.WriteSSEData([]string{"ERROR", "`repo_owner` is required"}, c, flusher)
+			return
+		}
+
+		if body.RepoRef == "" {
+			utils.WriteSSEData([]string{"ERROR", "`repo_ref` is required"}, c, flusher)
+			return
+		}
+
+		accessToken, err := db.GetGithubToken()
+		if err != nil {
+			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error getting github token: %s", err.Error())}, c, flusher)
+			return
+		}
+
+		payload := utils.PullfromGithub{
+			Owner:       body.RepoOwner,
+			Repo:        body.Name,
+			Ref:         body.RepoRef,
+			AccessToken: accessToken,
+			Destination: projectPath,
+		}
+
+		commithash, err := utils.PullFromGithub(payload)
+		if err != nil {
+			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error pulling repo from github: %s", err.Error())}, c, flusher)
+			return
+		}
+
+		projectPath = filepath.Join(projectPath, commithash)
+	}
+
+	BuildImage(uniqueSlug, projectPath, useCustomDockerfile, c, flusher)
+	if _, err := utils.GetDockerImage(uniqueSlug); err != nil {
+		utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("Error building docker image: %s", err)}, c, flusher)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":  true,
-		"message": "Project created",
-		"data": gin.H{
-			"slug": uniqueSlug,
-		},
-	})
+	envPath := filepath.Join(projectPath, ".env")
+	if body.Env != "" {
+		utils.WriteEnvFile(projectPath, body.Env)
+	}
+
+	status, _ := RunContainer(uniqueSlug, uniqueSlug, envPath, c, flusher)
+
+	project := utils.Project{
+		Name: body.Name,
+		Slug: uniqueSlug,
+		Type: &body.Type,
+		Env: &body.Env,
+		ProjectPath: &projectPath,
+		Status: &status,
+		ContainerName: &uniqueSlug,
+		CurrentImage: &uniqueSlug,
+	}
+
+	id, err := db.CreateProject(project)
+	if err != nil {
+		utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("Error saving project to db: %s", err)}, c, flusher)
+		return
+	}
+
+	// save logs
 
 }
 
@@ -301,7 +378,7 @@ func AddProjectSource(c *gin.Context) {
 			}
 		}
 
-		payload := PullfromGithub{
+		payload := utils.PullfromGithub{
 			Repo:        repo,
 			Owner:       owner,
 			Ref:         branch,
@@ -309,7 +386,7 @@ func AddProjectSource(c *gin.Context) {
 			Destination: tempDestination,
 		}
 
-		commitHash, err := pullFromGithub(payload)
+		commitHash, err := utils.PullFromGithub(payload)
 		if err != nil {
 			log.Printf("github repo pull error: %s", err)
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -755,82 +832,4 @@ func validateGithubToken(token string) error {
 	}
 
 	return nil
-}
-
-func pullFromGithub(p PullfromGithub) (commitHash string, err error) {
-	if p.AccessToken == "" {
-		return "", errors.New("GITHUB_ACCESS_TOKEN is not set")
-	}
-
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/zipball/%s", p.Owner, p.Repo, p.Ref)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+p.AccessToken)
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		var response map[string]string
-		json.NewDecoder(resp.Body).Decode(&response)
-		return "", fmt.Errorf("Github error: %s", response["message"])
-	}
-
-	var buf bytes.Buffer
-	size, err := io.Copy(&buf, resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), size)
-	if err != nil {
-		return "", err
-	}
-
-	for _, f := range r.File {
-		fpath := filepath.Join(p.Destination, f.Name)
-
-		if !strings.HasPrefix(fpath, filepath.Clean(p.Destination)+string(os.PathSeparator)) {
-			return "", fmt.Errorf("illegal file path: %s", fpath)
-		}
-
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(fpath, os.ModePerm)
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
-			return "", err
-		}
-
-		inFile, err := f.Open()
-		if err != nil {
-			return "", err
-		}
-
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			inFile.Close()
-			return "", err
-		}
-
-		_, err = io.Copy(outFile, inFile)
-		inFile.Close()
-		outFile.Close()
-		if err != nil {
-			return "", err
-		}
-	}
-
-	return r.Comment, nil
 }

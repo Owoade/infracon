@@ -2,21 +2,26 @@ package utils
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 )
@@ -25,6 +30,8 @@ var (
 	nonAlphanumericRegex = regexp.MustCompile(`[^a-z0-9]+`)
 	multipleHyphensRegex = regexp.MustCompile(`-+`)
 )
+
+const infraconLogSeparator = "[INFRACON-LOG-SEPARATOR]"
 
 func Slugify(s string) string {
 	s = strings.ToLower(s)
@@ -137,7 +144,7 @@ func UnzipFileFromMultipartFile(fh *multipart.FileHeader, dest string) (clientFo
 				topLevelDirectories = append(topLevelDirectories, strings.Split(f.Name, string(filepath.Separator))[0])
 			} else {
 				lastDir := topLevelDirectories[len(topLevelDirectories)-1]
-				if !isSubPath(lastDir, f.Name){
+				if !isSubPath(lastDir, f.Name) {
 					topLevelDirectories = append(topLevelDirectories, f.Name)
 				}
 			}
@@ -194,5 +201,219 @@ func isSubPath(base, target string) bool {
 	}
 
 	return !strings.HasPrefix(rel, "..")
+}
 
+func PathExists(p string) bool {
+	_, err := os.Stat(p)
+	if err == nil {
+		return true
+	}
+
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+func WriteSSEData(d []string, c *gin.Context, flusher http.Flusher) {
+	line := strings.Join(append([]string{strconv.Itoa(int(time.Now().UnixMilli()))}, d...), infraconLogSeparator)
+	fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+	flusher.Flush()
+}
+
+func ExecCommandAndStreamViaSSE(c *exec.Cmd, gc *gin.Context, f http.Flusher) {
+	if _, ok := gc.Writer.(http.Flusher); !ok {
+		return
+	}
+
+	println("sse function")
+	stdout, _ := c.StdoutPipe()
+	stderr, _ := c.StderrPipe()
+
+	logChan := make(chan string)
+	done := make(chan bool)
+
+	_ = c.Start()
+
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			logChan <- scanner.Text()
+		}
+	}()
+
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			fmt.Println("LOGS >>", scanner.Text())
+			logChan <- scanner.Text()
+		}
+	}()
+
+	go func() {
+		c.Wait()
+		done <- true
+	}()
+
+	for {
+		select {
+		case line := <-logChan:
+			WriteSSEData([]string{"BUILD", line}, gc, f)
+
+		case <-done:
+			WriteSSEData([]string{"BUILD", "BUILD finished"}, gc, f)
+			return
+
+		case <-gc.Request.Context().Done():
+			return
+		}
+	}
+
+}
+
+func GetDockerImage(imageName string) (di *DockerImage, err error) {
+	cmd := exec.Command("docker", "image", "inspect", imageName)
+
+	output, err := cmd.Output()
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect image: %w", err)
+	}
+
+	var result []DockerImage
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no image data found")
+	}
+
+	return &result[0], nil
+}
+
+func GetDeploymentStatusetDockerContainer(name string) (*DockerContainer, error) {
+
+	cmd := exec.Command("docker", "inspect", name)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect container: %w", err)
+	}
+	var containers []DockerContainer
+	if err := json.Unmarshal(output, &containers); err != nil {
+		return nil, fmt.Errorf("failed to parse docker inspect output: %w", err)
+	}
+	if len(containers) == 0 {
+		return nil, fmt.Errorf("no container found")
+	}
+	return &containers[0], nil
+}
+
+func WriteEnvFile(destination, env string) (string, error) {
+	if err := os.MkdirAll(destination, 0755); err != nil {
+		return "", err
+	}
+	merged := InjectPort(env, 3000)
+	envPath := filepath.Join(destination, ".env")
+	if err := os.WriteFile(envPath, []byte(merged), 0644); err != nil {
+		return "", err
+	}
+	return envPath, nil
+}
+
+func InjectPort(env string, port int) string {
+	lines := strings.Split(env, "\n")
+
+	found := false
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "PORT=") {
+			lines[i] = fmt.Sprintf("PORT=%d", port)
+			found = true
+			break
+		}
+	}
+	if !found {
+		lines = append(lines, fmt.Sprintf("PORT=%d", port))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func PullFromGithub(p PullfromGithub) (commitHash string, err error) {
+	if p.AccessToken == "" {
+		return "", errors.New("GITHUB_ACCESS_TOKEN is not set")
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/zipball/%s", p.Owner, p.Repo, p.Ref)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+p.AccessToken)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		var response map[string]string
+		json.NewDecoder(resp.Body).Decode(&response)
+		return "", fmt.Errorf("Github error: %s", response["message"])
+	}
+
+	var buf bytes.Buffer
+	size, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), size)
+	if err != nil {
+		return "", err
+	}
+
+	for _, f := range r.File {
+		fpath := filepath.Join(p.Destination, f.Name)
+
+		if !strings.HasPrefix(fpath, filepath.Clean(p.Destination)+string(os.PathSeparator)) {
+			return "", fmt.Errorf("illegal file path: %s", fpath)
+		}
+
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(fpath, os.ModePerm)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			return "", err
+		}
+
+		inFile, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			inFile.Close()
+			return "", err
+		}
+
+		_, err = io.Copy(outFile, inFile)
+		inFile.Close()
+		outFile.Close()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return r.Comment, nil
 }

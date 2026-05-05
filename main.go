@@ -48,6 +48,24 @@ func init() {
 				github_repo TEXT,
 				project_path TEXT,
 				top_level_directories TEXT,
+				status TEXT NOT NULL DEFAULT 'building',
+				container_name TEXT,
+				current_image TEXT,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			);
+
+			CREATE TABLE IF NOT EXISTS docker_images (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				project_id INTEGER NOT NULL,
+				image_tag TEXT,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			);
+
+			CREATE TABLE IF NOT EXISTS logs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				project_slug TEXT NOT NULL,
+				log TEXT,
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			);
 		`,
