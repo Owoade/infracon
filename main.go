@@ -57,7 +57,7 @@ func init() {
 
 			CREATE TABLE IF NOT EXISTS docker_images (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				project_id INTEGER NOT NULL,
+				project_slug TEXT NOT NULL,
 				image_tag TEXT,
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			);

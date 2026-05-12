@@ -59,3 +59,10 @@ type Project struct {
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
 }
+
+type ProjectImage struct {
+	ID        int       `json:"id"`
+	ProjectID int       `json:"project_id"`
+	ImageTag  string    `json:"image_tag"`
+	CreatedAt time.Time `json:"created_at"`
+}

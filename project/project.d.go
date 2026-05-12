@@ -12,6 +12,11 @@ type CreateProjectPayload struct {
 	Env                 string `form:"env"`
 }
 
+type RollDeploymentPayload struct {
+	Slug string `json:"slug"  binding:"required"`
+	Tag  string `json:"tag" binding:"required"`
+}
+
 type AddGithubTokenPayload struct {
 	Token string `json:"token" binding:"required"`
 }
@@ -49,8 +54,8 @@ type PullfromGithub struct {
 }
 
 type SetEnvironmentVariablePayload struct {
-	ProjectId string `json:"project_id"`
-	Env       string `json:"env"`
+	Slug string `json:"slug"  binding:"required"`
+	Env  string `json:"env" binding:"required"`
 }
 
 type Project struct {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,31 +35,47 @@ func CreateProject(c *gin.Context) {
 
 	var body CreateProjectPayload
 	if err := c.ShouldBind(&body); err != nil {
-		utils.WriteSSEData([]string{"ERROR", err.Error()}, c, flusher)
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
 		return
 	}
 
 	uniqueSlug := fmt.Sprintf("%s-%d", utils.Slugify(body.Name), time.Now().UnixMilli())
+	imageName := uniqueSlug
+	containerName := uniqueSlug
 	projectPath := filepath.Join("infracon-apps", uniqueSlug)
+
+	project := utils.Project{
+		Name: body.Name,
+		Slug: uniqueSlug,
+		Type: &body.Type,
+	}
+	var err error
+	project.ID, err = db.CreateProject(project)
+	if err != nil {
+		utils.WriteSSEData(uniqueSlug, []string{"ERROR", fmt.Sprintf("Error saving project to db: %s", err)}, c, flusher)
+		return
+	}
 
 	var useCustomDockerfile = body.UseCustomDockerfile == "true"
 
 	if body.Type == "zip-upload" {
 		file, err := c.FormFile("file")
 		if err != nil {
-			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error uploading file: %s", err)}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", fmt.Sprintf("error uploading file: %s", err)}, c, flusher)
 			return
 		}
 
 		folders, err := utils.UnzipFileFromMultipartFile(file, projectPath)
 		if err != nil {
-			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error unziping file: %s", err)}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", fmt.Sprintf("error unziping file: %s", err)}, c, flusher)
 			return
 		}
 
 		if len(folders) != 1 {
 			os.RemoveAll(projectPath)
-			utils.WriteSSEData([]string{"ERROR", "The uploaded zip file must contain exactly one root folder, but none or multiple were found."}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", "The uploaded zip file must contain exactly one root folder, but none or multiple were found."}, c, flusher)
 			return
 		}
 
@@ -67,23 +84,23 @@ func CreateProject(c *gin.Context) {
 
 	if body.Type == "github" {
 		if body.RepoName == "" {
-			utils.WriteSSEData([]string{"ERROR", "`repo_name` is required"}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", "`repo_name` is required"}, c, flusher)
 			return
 		}
 
 		if body.RepoOwner == "" {
-			utils.WriteSSEData([]string{"ERROR", "`repo_owner` is required"}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", "`repo_owner` is required"}, c, flusher)
 			return
 		}
 
 		if body.RepoRef == "" {
-			utils.WriteSSEData([]string{"ERROR", "`repo_ref` is required"}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", "`repo_ref` is required"}, c, flusher)
 			return
 		}
 
 		accessToken, err := db.GetGithubToken()
 		if err != nil {
-			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error getting github token: %s", err.Error())}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", fmt.Sprintf("error getting github token: %s", err.Error())}, c, flusher)
 			return
 		}
 
@@ -97,16 +114,16 @@ func CreateProject(c *gin.Context) {
 
 		commithash, err := utils.PullFromGithub(payload)
 		if err != nil {
-			utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("error pulling repo from github: %s", err.Error())}, c, flusher)
+			utils.WriteSSEData(uniqueSlug, []string{"ERROR", fmt.Sprintf("error pulling repo from github: %s", err.Error())}, c, flusher)
 			return
 		}
 
 		projectPath = filepath.Join(projectPath, commithash)
 	}
 
-	BuildImage(uniqueSlug, projectPath, useCustomDockerfile, c, flusher)
+	BuildImage(uniqueSlug, imageName, projectPath, useCustomDockerfile, c, flusher)
 	if _, err := utils.GetDockerImage(uniqueSlug); err != nil {
-		utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("Error building docker image: %s", err)}, c, flusher)
+		utils.WriteSSEData(uniqueSlug, []string{"ERROR", fmt.Sprintf("Error building docker image: %s", err)}, c, flusher)
 		return
 	}
 
@@ -115,26 +132,30 @@ func CreateProject(c *gin.Context) {
 		utils.WriteEnvFile(projectPath, body.Env)
 	}
 
-	status, _ := RunContainer(uniqueSlug, uniqueSlug, envPath, c, flusher)
+	status, _ := RunContainer(uniqueSlug, imageName, containerName, envPath, c, flusher)
 
-	project := utils.Project{
-		Name: body.Name,
-		Slug: uniqueSlug,
-		Type: &body.Type,
-		Env: &body.Env,
-		ProjectPath: &projectPath,
-		Status: &status,
+	project = utils.Project{
+		Env:           &body.Env,
+		ProjectPath:   &projectPath,
+		Status:        &status,
 		ContainerName: &uniqueSlug,
-		CurrentImage: &uniqueSlug,
+		CurrentImage:  &uniqueSlug,
 	}
 
-	id, err := db.CreateProject(project)
-	if err != nil {
-		utils.WriteSSEData([]string{"ERROR", fmt.Sprintf("Error saving project to db: %s", err)}, c, flusher)
+	if err := db.UpdateProject(project); err != nil {
+		utils.WriteSSEData(uniqueSlug, []string{"ERROR", fmt.Sprintf("Error saving project to db: %s", err)}, c, flusher)
 		return
 	}
 
-	// save logs
+	logs := utils.GetLogs(uniqueSlug)
+	defer utils.DeleteLogs(uniqueSlug)
+	if len(logs) > 0 {
+		if err := db.SaveLogs(uniqueSlug, logs); err != nil {
+			line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+			flusher.Flush()
+		}
+	}
 
 }
 
@@ -150,18 +171,8 @@ func GetProject(c *gin.Context) {
 		return
 	}
 
-	db, err := db.GetDatabase()
+	project, err := db.GetProject(slug)
 	if err != nil {
-		log.Printf("db error: %s", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Something went wrong",
-			"status":  false,
-		})
-		return
-	}
-	var project Project
-	if err := db.QueryRow("SELECT name, type, project_path, env, github_repo FROM projects WHERE slug = $1", slug).
-		Scan(&project.Name, &project.Type, &project.ProjectPath, &project.Env, &project.GithubRepo); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"message": "Project not found!",
@@ -187,18 +198,52 @@ func GetProject(c *gin.Context) {
 
 }
 
-func AddProjectSource(c *gin.Context) {
-	projectId := c.PostForm("project_id")
-	source := c.PostForm("source")
+func GetProjects(c *gin.Context) {
 
-	if err := utils.StringValidator("project_id", projectId, utils.ValidatorConfig{
-		NotEmpty:  true,
-		MaxLength: 16,
-	}); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"message": err.Error(),
+	projects, err := db.GetProjects()
+	if err != nil {
+		log.Printf("project fetch query error: %s", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": "Something went wrong",
 			"status":  false,
 		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": true,
+		"data": gin.H{
+			"project": projects,
+		},
+	})
+
+}
+
+func UpdateProjectSource(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, map[string]any{
+			"status":  false,
+			"message": "SSE not supported",
+		})
+		return
+	}
+
+	slug := c.PostForm("slug")
+	source := c.PostForm("source")
+	useCustomDockerfile := c.PostForm("use_custom_dockerfile") == "true"
+
+	if err := utils.StringValidator("slug", slug, utils.ValidatorConfig{
+		NotEmpty: true,
+	}); err != nil {
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
 		return
 	}
 
@@ -206,288 +251,290 @@ func AddProjectSource(c *gin.Context) {
 		NotEmpty:       true,
 		ExpectedValues: []string{"github", "zip-upload"},
 	}); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"message": err.Error(),
-			"status":  false,
-		})
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
 		return
 	}
 
-	db, err := db.GetDatabase()
+	project, err := db.GetProject(slug)
 	if err != nil {
-		log.Printf("db error: %s", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Something went wrong",
-			"status":  false,
-		})
-		return
-	}
-
-	var slug string
-	var existingProjectPath *string
-	if err := db.QueryRow("SELECT slug, project_path FROM projects WHERE id = $1", projectId).Scan(&slug, &existingProjectPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"message": "Project not found!",
-				"status":  false,
-			})
+			line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", "Project nor found"}, utils.InfraconLogSeparator)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+			flusher.Flush()
 			return
 		} else {
-			log.Printf("project lookup query error: %s", err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"message": "Something went wrong",
-				"status":  false,
-			})
+			line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", "Project nor found"}, utils.InfraconLogSeparator)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+			flusher.Flush()
 			return
 		}
 	}
 
-	home, _ := os.UserHomeDir()
-	destination := filepath.Join(home, "infracon-apps", slug)
-	tempDestination := filepath.Join(home, "infracon-apps", fmt.Sprintf("temp-%d", time.Now().UnixMilli()))
+	deploymentId := fmt.Sprintf("%s-%s", slug, strconv.Itoa(int(time.Now().UnixMilli())))
+	newProjectPath := filepath.Join("infracon-apps", deploymentId)
+	containerName := deploymentId
+	imageName := deploymentId
 
 	if source == "zip-upload" {
-		fileHeader, err := c.FormFile("file")
+		file, err := c.FormFile("file")
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"message": "Error uploading zip",
-				"status":  false,
-				"details": err.Error(),
-			})
+			utils.WriteSSEData(slug, []string{"ERROR", fmt.Sprintf("error uploading file: %s", err)}, c, flusher)
 			return
 		}
 
-		if err := utils.IsZipFile(fileHeader); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"message": "Invalid file",
-				"status":  false,
-				"details": err.Error(),
-			})
-			return
-		}
-
-		clientFolders, err := utils.UnzipFileFromMultipartFile(fileHeader, tempDestination)
+		folders, err := utils.UnzipFileFromMultipartFile(file, newProjectPath)
 		if err != nil {
-			log.Println(err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"message": "Error uploading zip",
-				"status":  false,
-			})
+			os.RemoveAll(newProjectPath)
+			utils.WriteSSEData(slug, []string{"ERROR", fmt.Sprintf("error unziping file: %s", err)}, c, flusher)
 			return
 		}
 
-		os.RemoveAll(destination)
-		os.Rename(tempDestination, destination)
-
-		if len(clientFolders) == 1 {
-			clientFolder := clientFolders[0]
-			destination = filepath.Join(destination, clientFolder)
-
-			if err := db.QueryRow("UPDATE projects SET project_path = $1 WHERE id = $2 RETURNING id", destination, projectId).Scan(new(int)); err != nil {
-				log.Printf("update query err: %s", err)
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"message": "Error uploading zip",
-					"status":  false,
-				})
-				return
-			}
-
-			c.JSON(http.StatusOK, gin.H{
-				"status":  true,
-				"message": "Source added",
-				"data": gin.H{
-					"top_level_folders": clientFolders,
-				},
-			})
-			return
-
-		} else {
-			if err := db.QueryRow("UPDATE projects SET project_path = $1, top_level_directories = $2 WHERE id = $3 RETURNING id", destination, strings.Join(clientFolders, ","), projectId).Scan(new(int)); err != nil {
-				log.Printf("update query err: %s", err)
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"message": "Error uploading zip",
-					"status":  false,
-				})
-				return
-			}
-			c.JSON(http.StatusOK, gin.H{
-				"status":  true,
-				"message": "Source added",
-				"data": gin.H{
-					"next_action": gin.H{
-						"message":           "YYour ZIP file contains multiple top-level folders. Please choose the correct one.",
-						"top_level_folders": clientFolders,
-					},
-				},
-			})
+		if len(folders) != 1 {
+			os.RemoveAll(newProjectPath)
+			utils.WriteSSEData(slug, []string{"ERROR", "The uploaded zip file must contain exactly one root folder, but none or multiple were found."}, c, flusher)
 			return
 		}
 
+		newProjectPath = filepath.Join(newProjectPath, folders[0])
 	}
 
 	if source == "github" {
-		repo := c.PostForm("repo")
-		owner := c.PostForm("owner")
-		branch := c.PostForm("branch")
+		repoName := c.PostForm("github_repo_name")
+		repoOwner := c.PostForm("github_owner")
+		repoBranch := c.PostForm("github_branch")
 
-		if err := utils.StringValidator("repo", repo, utils.ValidatorConfig{
-			NotEmpty: true,
-		}); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"status":  false,
-				"message": err.Error(),
-			})
+		if repoName == "" {
+			utils.WriteSSEData(project.Slug, []string{"ERROR", "`repo_name` is required"}, c, flusher)
 			return
 		}
 
-		if err := utils.StringValidator("owner", owner, utils.ValidatorConfig{
-			NotEmpty: true,
-		}); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"status":  false,
-				"message": err.Error(),
-			})
+		if repoOwner == "" {
+			utils.WriteSSEData(project.Slug, []string{"ERROR", "`repo_owner` is required"}, c, flusher)
 			return
 		}
 
-		if err := utils.StringValidator("branch", branch, utils.ValidatorConfig{
-			NotEmpty: true,
-		}); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"status":  false,
-				"message": err.Error(),
-			})
+		if repoBranch == "" {
+			utils.WriteSSEData(project.Slug, []string{"ERROR", "`repo_ref` is required"}, c, flusher)
 			return
 		}
 
-		var token string
-		if err := db.QueryRow("SELECT token FROM github_tokens").Scan(&token); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				c.JSON(http.StatusNotFound, gin.H{
-					"message": "Github token not found!",
-					"status":  false,
-				})
-				return
-			} else {
-				log.Printf("query token error: %s", err)
-				c.JSON(http.StatusOK, gin.H{
-					"message": "Something went wrong",
-					"status":  false,
-				})
-				return
-			}
+		accessToken, err := db.GetGithubToken()
+		if err != nil {
+			utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("error getting github token: %s", err.Error())}, c, flusher)
+			return
 		}
 
 		payload := utils.PullfromGithub{
-			Repo:        repo,
-			Owner:       owner,
-			Ref:         branch,
-			AccessToken: token,
-			Destination: tempDestination,
+			Owner:       repoOwner,
+			Repo:        repoName,
+			Ref:         repoBranch,
+			AccessToken: accessToken,
+			Destination: newProjectPath,
 		}
 
-		commitHash, err := utils.PullFromGithub(payload)
+		commithash, err := utils.PullFromGithub(payload)
 		if err != nil {
-			log.Printf("github repo pull error: %s", err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"message": "Something went wrong",
-				"status":  false,
-				"details": gin.H{
-					"message":        err.Error(),
-					"possible_cause": "Invalid github token or repository name, owner or branch",
-				},
-			})
+			utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("error pulling repo from github: %s", err.Error())}, c, flusher)
 			return
 		}
 
-		os.RemoveAll(destination)
-		os.Rename(tempDestination, destination)
+		newProjectPath = filepath.Join(newProjectPath, commithash)
+	}
 
-		clientFolder := fmt.Sprintf("%s-%s-%s", owner, repo, commitHash)
-		destination = filepath.Join(destination, clientFolder)
-		githubRepo := map[string]string{
-			"name":   repo,
-			"owner":  owner,
-			"branch": branch,
+	BuildImage(deploymentId, deploymentId, newProjectPath, useCustomDockerfile, c, flusher)
+	if _, err := utils.GetDockerImage(deploymentId); err != nil {
+		utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("Error building docker image: %s", err)}, c, flusher)
+		return
+	}
+
+	envPath := filepath.Join(newProjectPath, ".env")
+	if project.Env != nil {
+		utils.WriteEnvFile(newProjectPath, *project.Env)
+	}
+
+	status, _ := RunContainer(project.Slug, imageName, containerName, envPath, c, flusher)
+	oldProjectPath := project.ProjectPath
+	oldDockerImage := project.CurrentImage
+	oldDockerContainer := project.ContainerName
+
+	project.Status = &status
+	project.ContainerName = &containerName
+	project.CurrentImage = &imageName
+	project.Type = &source
+	project.ProjectPath = &newProjectPath
+
+	if err := RemoveContainer(slug, *oldDockerContainer, c, flusher); err != nil {
+		utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("Error removing old docker container: %s", err)}, c, flusher)
+		return
+	}
+
+	if err := db.UpdateProject(*project); err != nil {
+		utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("Error saving project to db: %s", err)}, c, flusher)
+		return
+	}
+
+	os.RemoveAll(*oldProjectPath)
+	if err := db.AddDockerImage(slug, *oldDockerImage); err != nil {
+		utils.WriteSSEData(slug, []string{"ERROR", fmt.Sprintf("Error archiving old docker image: %s", err)}, c, flusher)
+	}
+
+	logs := utils.GetLogs(project.Slug)
+	defer utils.DeleteLogs(project.Slug)
+	if len(logs) > 0 {
+		if err := db.SaveLogs(project.Slug, logs); err != nil {
+			utils.WriteSSEData(slug, []string{"ERROR", fmt.Sprintf("Error saving logs: %s", err)}, c, flusher)
 		}
-		bytes, _ := json.Marshal(githubRepo)
-		marshaledRepo := string(bytes)
-
-		if err := db.QueryRow("UPDATE projects SET project_path = $1, github_repo = $2 WHERE id = $3 RETURNING id", destination, marshaledRepo, projectId).Scan(new(int)); err != nil {
-			log.Printf("update query err: %s", err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"message": "Error uploading zip",
-				"status":  false,
-			})
-			return
-		}
-
-		println("existingProjectPath", *existingProjectPath)
-		println("destination", destination)
-		if existingProjectPath != nil && destination != *existingProjectPath {
-			go os.RemoveAll(*existingProjectPath)
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status":  true,
-			"message": "Source Added",
-		})
-
 	}
 
 }
 
 func SetEnvironmentVariable(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, map[string]any{
+			"status":  false,
+			"message": "SSE not supported",
+		})
+		return
+	}
+
 	var body SetEnvironmentVariablePayload
 	if err := c.ShouldBindBodyWithJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status":  false,
-			"message": "Invalid payload",
-			"details": err.Error(),
-		})
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
 		return
 	}
 
-	db, err := db.GetDatabase()
+	project, err := db.GetProject(body.Slug)
 	if err != nil {
-		log.Printf("db error: %s", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Something went wrong",
-			"status":  false,
-		})
-		return
-	}
-
-	var project_path string
-	if err := db.QueryRow("SELECT project_path FROM projects WHERE id = $1", body.ProjectId).Scan(&project_path); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"message": "Project not found!",
-				"status":  false,
-			})
+			line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", "Project not found"}, utils.InfraconLogSeparator)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+			flusher.Flush()
 			return
 		} else {
-			log.Printf("project lookup query error: %s", err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"message": "Something went wrong",
-				"status":  false,
-			})
+			line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+			flusher.Flush()
 			return
 		}
 	}
 
-	if err := db.QueryRow("UPDATE projects SET env = $1 WHERE id = $2 RETURNING id", body.Env, body.ProjectId).Scan(new(int)); err != nil {
-		log.Printf("env write error: %s", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Something went wrong",
-			"status":  false,
-		})
+	envPath := filepath.Join(*project.ProjectPath, ".env")
+	if body.Env != "" {
+		utils.WriteEnvFile(*project.ProjectPath, body.Env)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":  true,
-		"message": "Environment variables set!",
-	})
+	status, _ := RunContainer(body.Slug, *project.CurrentImage, *project.ContainerName, envPath, c, flusher)
+	update := utils.Project{
+		ID:     project.ID,
+		Status: &status,
+		Env:    &body.Env,
+	}
+
+	if err := db.UpdateProject(update); err != nil {
+		utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("Error saving project to db: %s", err)}, c, flusher)
+		return
+	}
+
+	utils.WriteSSEData(body.Slug, []string{"ERROR", "Environment variable set"}, c, flusher)
+
+}
+
+func RollDeployment(c *gin.Context) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, map[string]any{
+			"status":  false,
+			"message": "SSE not supported",
+		})
+		return
+	}
+
+	var body RollDeploymentPayload
+	if err := c.ShouldBindBodyWithJSON(&body); err != nil {
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
+		return
+	}
+
+	project, err := db.GetProject(body.Slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", "Project not found"}, utils.InfraconLogSeparator)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+			flusher.Flush()
+			return
+		} else {
+			line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", err.Error()}, utils.InfraconLogSeparator)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+			flusher.Flush()
+			return
+		}
+	}
+
+	if *project.CurrentImage == body.Tag {
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", "Current image already deployed"}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
+		return
+	}
+
+	imageTagExists, err := db.HasDockerImage(project.Slug, body.Tag)
+	if err != nil {
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", fmt.Sprintf("Error getting docker image: %s", err)}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
+		return
+	}
+
+	if !imageTagExists {
+		line := strings.Join([]string{strconv.Itoa(int(time.Now().UnixMilli())), "ERROR", "Docker image not found"}, utils.InfraconLogSeparator)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", line)
+		flusher.Flush()
+		return
+	}
+
+	envPath := filepath.Join(*project.ProjectPath, ".env")
+	oldContainerName := project.ContainerName
+	oldImageName := *project.CurrentImage
+	newContainerName := fmt.Sprintf("%s-%s", body.Tag, strconv.Itoa(int(time.Now().UnixMilli())))
+	status, _ := RunContainer(body.Slug, body.Tag, *project.ContainerName, envPath, c, flusher)
+	update := utils.Project{
+		ID:            project.ID,
+		Status:        &status,
+		ContainerName: &newContainerName,
+		CurrentImage:  &body.Tag,
+	}
+
+	if err := db.UpdateProject(update); err != nil {
+		utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("Error saving project to db: %s", err)}, c, flusher)
+		return
+	}
+
+	if err := db.AddDockerImage(body.Slug, oldImageName); err != nil {
+		utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("Error archiving docker image: %s", err)}, c, flusher)
+		return
+	}
+
+	if err := RemoveContainer(body.Slug, *oldContainerName, c, flusher); err != nil {
+		utils.WriteSSEData(project.Slug, []string{"ERROR", fmt.Sprintf("Error removing old docker container: %s", err)}, c, flusher)
+		return
+	}
 
 }
 

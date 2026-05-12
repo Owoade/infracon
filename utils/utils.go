@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -29,9 +30,11 @@ import (
 var (
 	nonAlphanumericRegex = regexp.MustCompile(`[^a-z0-9]+`)
 	multipleHyphensRegex = regexp.MustCompile(`-+`)
+	Logs                 map[string][]string
+	logsMu               sync.RWMutex
 )
 
-const infraconLogSeparator = "[INFRACON-LOG-SEPARATOR]"
+const InfraconLogSeparator = "[INFRACON-LOG-SEPARATOR]"
 
 func Slugify(s string) string {
 	s = strings.ToLower(s)
@@ -212,13 +215,28 @@ func PathExists(p string) bool {
 	return !errors.Is(err, os.ErrNotExist)
 }
 
-func WriteSSEData(d []string, c *gin.Context, flusher http.Flusher) {
-	line := strings.Join(append([]string{strconv.Itoa(int(time.Now().UnixMilli()))}, d...), infraconLogSeparator)
+func WriteSSEData(slug string, d []string, c *gin.Context, flusher http.Flusher) {
+	line := strings.Join(append([]string{strconv.Itoa(int(time.Now().UnixMilli()))}, d...), InfraconLogSeparator)
 	fmt.Fprintf(c.Writer, "data: %s\n\n", line)
 	flusher.Flush()
+	logsMu.Lock()
+	Logs[slug] = append(Logs[slug], line)
+	logsMu.Unlock()
 }
 
-func ExecCommandAndStreamViaSSE(c *exec.Cmd, gc *gin.Context, f http.Flusher) {
+func GetLogs(slug string) []string {
+	logsMu.RLock()
+	defer logsMu.Unlock()
+	return Logs[slug]
+}
+
+func DeleteLogs(slug string) {
+	logsMu.RLock()
+	defer logsMu.Unlock()
+	delete(Logs, slug)
+}
+
+func ExecCommandAndStreamViaSSE(slug string, c *exec.Cmd, gc *gin.Context, f http.Flusher) {
 	if _, ok := gc.Writer.(http.Flusher); !ok {
 		return
 	}
@@ -255,10 +273,10 @@ func ExecCommandAndStreamViaSSE(c *exec.Cmd, gc *gin.Context, f http.Flusher) {
 	for {
 		select {
 		case line := <-logChan:
-			WriteSSEData([]string{"BUILD", line}, gc, f)
+			WriteSSEData(slug, []string{"BUILD", line}, gc, f)
 
 		case <-done:
-			WriteSSEData([]string{"BUILD", "BUILD finished"}, gc, f)
+			WriteSSEData(slug, []string{"BUILD", "BUILD finished"}, gc, f)
 			return
 
 		case <-gc.Request.Context().Done():
